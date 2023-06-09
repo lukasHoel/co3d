@@ -12,7 +12,6 @@ from pytorch3d.renderer.cameras import CamerasBase
 from pytorch3d.implicitron.dataset.json_index_dataset import JsonIndexDataset
 from pytorch3d.implicitron.dataset.dataset_base import FrameData
 from pytorch3d.structures import Pointclouds
-from pytorch3d.implicitron.dataset.json_index_dataset import _get_clamp_bbox
 from pytorch3d.implicitron.models.base_model import ImplicitronRender
 from pytorch3d.implicitron.dataset.visualize import get_implicitron_sequence_pointcloud
 from pytorch3d.implicitron.tools.point_cloud_utils import (
@@ -28,7 +27,7 @@ def render_point_cloud(
     point_radius: float = 0.03,
 ) -> ImplicitronRender:
     """
-    Render the point cloud `pointcloud` to the camera `camera` using the 
+    Render the point cloud `pointcloud` to the camera `camera` using the
     PyTorch3D point cloud renderer.
 
     Args:
@@ -69,14 +68,10 @@ def paste_render_to_original_image(
     """
     # size of the render
     render_size = render.image_render.shape[2:]
-    
+
     # estimate render scale w.r.t. the frame_data images
-    render_scale_factors = [
-        sr / s for sr, s in zip(render_size, frame_data.image_rgb.shape[2:])
-    ]
-    assert abs(render_scale_factors[0]-render_scale_factors[1]) <= 1e-2, (
-        "non-isotropic render rescale"
-    )
+    render_scale_factors = [sr / s for sr, s in zip(render_size, frame_data.image_rgb.shape[2:])]
+    assert abs(render_scale_factors[0] - render_scale_factors[1]) <= 1e-2, "non-isotropic render rescale"
 
     # original image size
     orig_size = frame_data.image_size_hw[0].tolist()
@@ -86,7 +81,7 @@ def paste_render_to_original_image(
         bbox_xywh = frame_data.crop_bbox_xywh[0]
     else:
         bbox_xywh = torch.LongTensor([0, 0, orig_size[1], orig_size[0]])
-    
+
     # get the valid part of the render
     render_bounds_wh = [None, None]
     for axis in [0, 1]:
@@ -99,33 +94,33 @@ def paste_render_to_original_image(
             mask_crop_render_size = frame_data.mask_crop
         # get the bounds of the mask_crop along dimemsion = 1-axis
         valid_dim_pix = mask_crop_render_size[0, 0].sum(dim=axis).reshape(-1).nonzero()
-        assert valid_dim_pix.min()==0
+        assert valid_dim_pix.min() == 0
         render_bounds_wh[axis] = valid_dim_pix.max().item() + 1
-    
+
     render_out = {}
     for render_type, render_val in dataclasses.asdict(render).items():
         if render_val is None:
             continue
         # get the valid part of the render
-        render_valid_ = render_val[..., :render_bounds_wh[1], :render_bounds_wh[0]]
+        render_valid_ = render_val[..., : render_bounds_wh[1], : render_bounds_wh[0]]
 
         # resize the valid part to the original size
         render_resize_ = torch.nn.functional.interpolate(
             render_valid_,
             size=tuple(reversed(bbox_xywh[2:].tolist())),
-            mode="bilinear" if render_type=="image_render" else "nearest",
-            align_corners=False if render_type=="image_render" else None,
+            mode="bilinear" if render_type == "image_render" else "nearest",
+            align_corners=False if render_type == "image_render" else None,
         )
 
         # paste the original-sized crop to the original image
         render_pasted_ = render_resize_.new_zeros(1, render_resize_.shape[1], *orig_size)
         render_pasted_[
             ...,
-            bbox_xywh[1]:(bbox_xywh[1]+render_resize_.shape[2]),
-            bbox_xywh[0]:(bbox_xywh[0]+render_resize_.shape[3]),
+            bbox_xywh[1] : (bbox_xywh[1] + render_resize_.shape[2]),
+            bbox_xywh[0] : (bbox_xywh[0] + render_resize_.shape[3]),
         ] = render_resize_
         render_out[render_type] = render_pasted_
-        
+
     # if True:
     #     # debug visualize
     #     from visdom import Visdom
@@ -190,7 +185,7 @@ def get_eval_frame_data_pointcloud(
 ):
     """
     Generate a pointcloud by unprojecting the known depth maps of a `FrameData` object
-    `eval_frame_data`. 
+    `eval_frame_data`.
 
     Args:
         eval_frame_data: `FrameData` to unproject.

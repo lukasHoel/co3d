@@ -17,13 +17,11 @@ from tqdm import tqdm
 from omegaconf import DictConfig
 from typing import Tuple
 
-from co3d.utils import dbir_utils 
+from co3d.utils import dbir_utils
 from pytorch3d.renderer.cameras import CamerasBase, PerspectiveCameras
 from pytorch3d.renderer.camera_utils import join_cameras_as_batch
 from pytorch3d.implicitron.dataset.json_index_dataset import JsonIndexDataset
-from pytorch3d.implicitron.dataset.json_index_dataset_map_provider_v2 import (
-    JsonIndexDatasetMapProviderV2
-)
+from pytorch3d.implicitron.dataset.json_index_dataset_map_provider_v2 import JsonIndexDatasetMapProviderV2
 from pytorch3d.implicitron.tools.config import expand_args_fields
 from pytorch3d.implicitron.models.visualization.render_flyaround import render_flyaround
 from pytorch3d.implicitron.dataset.dataset_base import FrameData
@@ -36,12 +34,17 @@ from pytorch3d.implicitron.tools.point_cloud_utils import (
     get_rgbd_point_cloud,
 )
 
+from pytorch3d.ops import utils as oputil
+from pytorch3d.ops import knn_points
+from pytorch3d.structures.pointclouds import Pointclouds
 
+
+# DATASET_ROOT = "/Users/lukashoel/datasets/co3d"
 DATASET_ROOT = os.getenv("CO3DV2_DATASET_ROOT")
 
 
 logger = logging.getLogger(__file__)
-        
+
 
 def main(
     output_dir: str = os.path.join(os.path.dirname(__file__), "show_co3d_dataset_files"),
@@ -71,23 +74,25 @@ def main(
     # get the category list
     if DATASET_ROOT is None:
         raise ValueError(
-            "Please set the CO3DV2_DATASET_ROOT environment variable to a valid"
-            " CO3Dv2 dataset root folder."
+            "Please set the CO3DV2_DATASET_ROOT environment variable to a valid" " CO3Dv2 dataset root folder."
         )
     with open(os.path.join(DATASET_ROOT, "category_to_subset_name_list.json"), "r") as f:
         category_to_subset_name_list = json.load(f)
-    
+
     # get the visdom connection
     viz = get_visdom_connection()
 
     # iterate over the co3d categories
     categories = sorted(list(category_to_subset_name_list.keys()))
     for category in tqdm(categories):
+        category_path = os.path.join(DATASET_ROOT, category)
+        if not os.path.exists(category_path):
+            print("Skipping, does not exist", category_path)
+            continue
 
         subset_name_list = category_to_subset_name_list[category]
 
         for subset_name in subset_name_list:
-
             # obtain the dataset
             expand_args_fields(JsonIndexDatasetMapProviderV2)
             dataset_map = JsonIndexDatasetMapProviderV2(
@@ -96,9 +101,7 @@ def main(
                 test_on_train=False,
                 only_test_set=False,
                 load_eval_batches=True,
-                dataset_JsonIndexDataset_args=DictConfig(
-                    {"remove_empty_masks": False, "load_point_clouds": True}
-                ),
+                dataset_JsonIndexDataset_args=DictConfig({"remove_empty_masks": False, "load_point_clouds": True}),
             ).get_dataset_map()
 
             train_dataset = dataset_map["train"]
@@ -106,42 +109,43 @@ def main(
             # select few sequences to visualize
             sequence_names = list(train_dataset.seq_annots.keys())
 
+            # filter those that exist
+            sequence_names = [s for s in sequence_names if os.path.exists(os.path.join(category_path, s))]
+
             # select few sequence names
             show_sequence_names = random.sample(
                 sequence_names,
                 k=min(n_show_sequences_per_category, len(sequence_names)),
             )
-            
-            for sequence_name in show_sequence_names:
 
+            for sequence_name in show_sequence_names:
                 # load up a bunch of frames
-                show_dataset_idx = [
-                    x[2] for x in list(train_dataset.sequence_frames_in_order(sequence_name))
-                ]
+                show_dataset_idx = [x[2] for x in list(train_dataset.sequence_frames_in_order(sequence_name))]
                 random.shuffle(show_dataset_idx)
                 show_dataset_idx = show_dataset_idx[:n_frames_show]
                 data_to_show = [train_dataset[i] for i in show_dataset_idx]
                 data_to_show_collated = data_to_show[0].collate(data_to_show)
-                
+
                 # show individual frames
                 all_ims = []
                 for k in ["image_rgb", "depth_map", "depth_mask", "fg_probability"]:
                     # all_ims_now = torch.stack([d[k] for d in data_to_show])
                     all_ims_now = getattr(data_to_show_collated, k)
-                    if k=="depth_map":
-                        all_ims_now = make_depth_image(
-                            all_ims_now, torch.ones_like(all_ims_now)
-                        )
+                    if k == "depth_map":
+                        all_ims_now = make_depth_image(all_ims_now, torch.ones_like(all_ims_now))
                     if k in ["depth_mask", "fg_probability", "depth_map"]:
                         all_ims_now = all_ims_now.repeat(1, 3, 1, 1)
                     all_ims.append(all_ims_now.clamp(0.0, 1.0))
                 all_ims = torch.cat(all_ims, dim=2)
                 title = f"random_frames"
                 viz.images(
-                    all_ims, nrow=all_ims.shape[-1], env=visdom_env,
-                    win=title, opts={"title": title},
+                    all_ims,
+                    nrow=all_ims.shape[-1],
+                    env=visdom_env,
+                    win=title,
+                    opts={"title": title},
                 )
-                
+
                 if visualize_3d_scene:
                     # visualize a 3d plotly plot of the scene
                     camera_show = data_to_show_collated.camera
@@ -152,24 +156,34 @@ def main(
                         (data_to_show_collated.fg_probability > 0.5).float(),
                         mask_points=True,
                     )
+
+                    # outlier removal in pointcloud
+                    def outlier_removal(pcd, threshold=0.1):
+                        pcd_tensor = oputil.convert_pointclouds_to_tensor(pcd)[0]
+                        nn_dists, nn_idx, nn = knn_points(pcd_tensor, pcd_tensor, K=10)
+                        pcd_filtered = Pointclouds(pcd[nn_dists[0, :, 1:].mean(1) < threshold][None, ...])
+                        return pcd_filtered
+
+                    filtered_pointcloud = outlier_removal(pointcloud_show)
+
                     viz.plotlyplot(
-                        plot_scene(
-                            {
-                                sequence_name: {
-                                    "camera":camera_show,
-                                    "point_cloud": pointcloud_show
-                                }
-                            }
-                        ),
+                        plot_scene({sequence_name: {"camera": camera_show, "point_cloud": pointcloud_show}}),
                         env=visdom_env,
                         win="3d_scene",
+                    )
+
+                    viz.plotlyplot(
+                        plot_scene(
+                            {sequence_name: {"camera": camera_show, "point_cloud_filtered": filtered_pointcloud}}
+                        ),
+                        env=visdom_env,
+                        win="3d_scene_filtered",
                     )
 
                 if not visualize_point_clouds:
                     continue
 
                 for load_dataset_pointcloud in [True, False]:
-
                     model = PointcloudRenderingModel(
                         train_dataset,
                         sequence_name,
@@ -186,7 +200,7 @@ def main(
                     os.makedirs(os.path.dirname(video_path), exist_ok=True)
 
                     logger.info(f"Rendering rotating video {video_path}")
-                    
+
                     render_flyaround(
                         train_dataset,
                         sequence_name,
@@ -217,7 +231,7 @@ class PointcloudRenderingModel(torch.nn.Module):
         train_dataset: JsonIndexDataset,
         sequence_name: str,
         render_size: Tuple[int, int] = [400, 400],
-        device = None,
+        device=None,
         load_dataset_pointcloud: bool = False,
     ):
         super().__init__()
@@ -227,7 +241,7 @@ class PointcloudRenderingModel(torch.nn.Module):
             sequence_name,
             load_dataset_pointcloud=load_dataset_pointcloud,
         ).to(device)
-        
+
     def forward(
         self,
         camera: CamerasBase,
@@ -246,5 +260,5 @@ class PointcloudRenderingModel(torch.nn.Module):
         }
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
