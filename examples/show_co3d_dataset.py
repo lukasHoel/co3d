@@ -39,10 +39,7 @@ from pytorch3d.ops import knn_points
 from pytorch3d.structures.pointclouds import Pointclouds
 
 
-# DATASET_ROOT = "/Users/lukashoel/datasets/co3d"
 DATASET_ROOT = os.getenv("CO3DV2_DATASET_ROOT")
-
-
 logger = logging.getLogger(__file__)
 
 
